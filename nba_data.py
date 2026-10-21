@@ -250,35 +250,89 @@ def _month_chunks(start_d, end_d):
         cur = nxt
 
 
+class FetchFailed(Exception):
+    """Raised INSIDE cached functions when a call fails, so st.cache_data
+    doesn't store the failure. (Previously a failed call returned [] and that
+    empty result was cached — for a week on past months — which is exactly
+    how the Backtest page ended up seeing no games at all.)"""
+
+
+def _get_events_or_raise(params, timeout=30):
+    data = safe_get(f"{ESPN_SITE}/scoreboard", params, timeout=timeout)
+    if not isinstance(data, dict) or "events" not in data:
+        raise FetchFailed(str(params))
+    return _events_from(data)
+
+
 @st.cache_data(ttl=10800, show_spinner=False)
 def _fetch_range(start_str, end_str):
-    data = safe_get(f"{ESPN_SITE}/scoreboard",
-                    {"dates": f"{start_str}-{end_str}", "limit": 1000}, timeout=30)
-    return _events_from(data)
+    return _get_events_or_raise({"dates": f"{start_str}-{end_str}", "limit": 1000})
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
 def _fetch_range_frozen(start_str, end_str):
-    """Same as _fetch_range, for months fully in the past — finished games
-    never change, so these are cached for a week."""
-    return _fetch_range(start_str, end_str)
+    """Months fully in the past — finished games never change, cached a week.
+    Only ever holds a SUCCESSFUL response (failures raise and aren't cached)."""
+    return _get_events_or_raise({"dates": f"{start_str}-{end_str}", "limit": 1000})
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def _fetch_day_frozen(ds):
+    """One past day's games — the same request the live slate uses, so it's
+    the reliable fallback if ESPN's date-range form returns nothing."""
+    return _get_events_or_raise({"dates": ds, "limit": 100}, timeout=20)
+
+
+def _fetch_days(a, b):
+    """All games between dates a and b, one cached call per day, 8 in parallel
+    (a full month is ~30 small calls; only slow the first time)."""
+    days = [(a + timedelta(days=i)).strftime("%Y%m%d") for i in range((b - a).days + 1)]
+
+    recent = (today_et() - timedelta(days=2)).strftime("%Y%m%d")
+
+    def one(ds):
+        try:
+            # Last couple of days use the short-TTL fetch, so a game that was
+            # still in progress isn't frozen as unfinished for a week.
+            return fetch_scoreboard(ds) if ds >= recent else _fetch_day_frozen(ds)
+        except Exception:
+            return []
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        return [g for day in ex.map(one, days) for g in day]
+
+
+# Visible diagnostics for the Backtest page — how the last season pull went.
+LAST_SEASON_FETCH = {}
 
 
 def fetch_season_results(season, before_date_str):
     """Completed games of `season` played strictly BEFORE before_date (ET).
-    Pulled a month at a time (one call each) rather than per day, and capped
-    at the requested date so a past slate is never rebuilt with games that
-    hadn't happened yet."""
+    Tries one date-range call per month first; any month that fails or comes
+    back empty is re-fetched day by day. Capped at the requested date so a
+    past slate is never rebuilt with games that hadn't happened yet."""
     end = datetime.strptime(str(before_date_str), "%Y-%m-%d").date() - timedelta(days=1)
     start = season_start(season)
     end = min(end, date(season, 6, 30))
+    LAST_SEASON_FETCH.clear()
+    LAST_SEASON_FETCH.update(season=season, months_range=0, months_daily=0, games=0)
     if end < start:
         return []
     this_month = date(today_et().year, today_et().month, 1)
     games, seen = [], set()
     for a, b in _month_chunks(start, end):
         fn = _fetch_range_frozen if b < this_month else _fetch_range
-        for g in fn(a.strftime("%Y%m%d"), b.strftime("%Y%m%d")):
+        try:
+            evs = fn(a.strftime("%Y%m%d"), b.strftime("%Y%m%d"))
+        except Exception:
+            evs = []
+        if evs:
+            LAST_SEASON_FETCH["months_range"] += 1
+        else:
+            evs = _fetch_days(a, b)
+            LAST_SEASON_FETCH["months_daily"] += 1
+        for g in evs:
             if not g["completed"] or g["event_id"] in seen:
                 continue
             gd = to_et_date(g["start_iso"])
@@ -288,11 +342,20 @@ def fetch_season_results(season, before_date_str):
             seen.add(g["event_id"])
             games.append(g)
     games.sort(key=lambda g: g["start_iso"])
+    LAST_SEASON_FETCH["games"] = len(games)
     return games
 
 
-@st.cache_data(ttl=604800, show_spinner=False)
 def fetch_standings(season):
+    """Wrapper: {} on failure, but the failure itself is never cached."""
+    try:
+        return _fetch_standings_cached(season)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def _fetch_standings_cached(season):
     """Season points for/against per team from ESPN standings (one call).
     Used as the PRIOR for early-season team ratings — season = the year the
     season ended. Returns {team_id: {pf, pa, gp, name}}."""
@@ -313,6 +376,8 @@ def fetch_standings(season):
             walk(child)
 
     walk(data)
+    if not out:
+        raise FetchFailed(f"standings {season}")
     return out
 
 

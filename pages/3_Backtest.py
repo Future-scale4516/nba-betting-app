@@ -19,13 +19,21 @@ days = st.slider("Days to look back", 3, 45, 14)
 if st.button("Run backtest"):
     with st.spinner("Rebuilding ratings day by day and scoring games..."):
         recs, resid, days_done = run_game_backtest(sel_date, days)
-    st.session_state["bt"] = (recs, resid, days_done, str(sel_date))
+        diag = dict(LAST_SEASON_FETCH)
+        diag["prior_teams"] = len(fetch_standings(season_for(sel_date) - 1))
+    st.session_state["bt"] = (recs, resid, days_done, str(sel_date), diag)
 
 bt = st.session_state.get("bt")
 if bt and bt[3] == str(sel_date):
-    recs, resid, days_done, _ = bt
+    recs, resid, days_done, _, diag = bt
+    st.caption(f"Data check — season {diag.get('season')}: {diag.get('games', 0)} completed games "
+               f"loaded ({diag.get('months_range', 0)} month(s) in one call, "
+               f"{diag.get('months_daily', 0)} fetched day by day) · last-season ratings for "
+               f"{diag.get('prior_teams', 0)}/30 teams.")
     if not recs:
-        st.warning("No completed games in that window.")
+        st.warning("No completed games in that window. If the data check above shows 0 games, "
+                   "ESPN didn't return the schedule — hit **Clear Cache** in the sidebar and "
+                   "run again; if it's still 0, send me a screenshot of that line.")
     else:
         s = calib_summary(recs, "Moneyline (home win)")
         c1, c2, c3, c4 = st.columns(4)
