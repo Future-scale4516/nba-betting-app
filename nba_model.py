@@ -36,8 +36,10 @@ LEAGUE_PPG_DEFAULT = 114.5     # per-team points per game fallback
 HOME_COURT = 2.4               # home advantage in points of margin (has shrunk
                                # over the last decade; ~2-2.5 recently)
 B2B_PENALTY = 1.8              # points off a team on the 2nd night of a back-to-back
-MARGIN_SD = 12.0               # SD of final margin around the model's mean
-TOTAL_SD = 18.5                # SD of final total around the model's mean
+MARGIN_SD = 14.5               # SD of final margin around the model's mean — fitted from
+                               # the Backtest page (2025-26 season, ~300 games, was 12.0)
+TOTAL_SD = 18.5                # SD of final total around the model's mean — fitted figure
+                               # matched the provisional value exactly, so left unchanged
 PRIOR_GAMES_WEIGHT = 12        # last season counts as this many current-season games
 PRIOR_REGRESSION = 0.70        # keep 70% of last season's distance from average
                                # (offseason roster churn pulls everyone to the middle)
